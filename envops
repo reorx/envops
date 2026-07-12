@@ -1,0 +1,331 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""
+envops - inspect and manipulate .env files safely
+
+Values that look like secrets are masked by default in output.
+
+Usage:
+    # show env key-values, secrets masked
+    envops show ./test.env
+
+    # show certain keys; --unsafe exposes values (use with caution)
+    envops show ./test.env -k FOO BAR
+    envops show ./test.env -k FOO BAR --unsafe
+
+    # list keys only
+    envops list-keys ./test.env
+
+    # copy pairs from source to dest; changes are printed (masked)
+    envops copy ./test.env /path/to/dest.env -k FOO BAR
+    envops copy ./test.env /path/to/dest.env --full
+
+    # set a key's value from stdin
+    echo value | envops set ./test.env -k FOO
+
+    # read a key's raw value (last resort, exposes the value)
+    envops unsafe-read-value ./test.env -K FOO
+"""
+
+import argparse
+import math
+import re
+import sys
+from pathlib import Path
+
+LINE_RE = re.compile(r'^(?P<export>\s*export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$')
+
+SECRET_KEY_RE = re.compile(
+    r'(SECRET|TOKEN|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_?KEY|PRIVATE|CREDENTIAL|AUTH|SALT|SIGNING|DSN)',
+    re.IGNORECASE,
+)
+
+SECRET_VALUE_RE = re.compile(
+    r'^(sk-|sk_|pk_|rk_|ghp_|gho_|ghs_|github_pat_|glpat-|xox[baprs]-|AKIA[0-9A-Z]|eyJ[A-Za-z0-9_-]+\.)'
+)
+
+# keys whose trailing word marks plain config, not a credential (e.g. BETTER_AUTH_URL)
+NONSECRET_KEY_RE = re.compile(
+    r'(?:^|_)(URL|URI|ENDPOINT|HOST|PORT|DOMAIN|PATH|FILE|DIR|NAME|VERSION|REGION|MODE|TELEMETRY|TRACING|ENABLED|TIMEOUT)$',
+    re.IGNORECASE,
+)
+
+# scheme is any reasonable-length word before ://, not an enumeration of known schemes
+URL_SPLIT_RE = re.compile(
+    r'^(?P<head>[a-z][a-z0-9+.-]{0,31}://)'
+    r'(?:(?P<userinfo>[^/@\s]+)@)?'
+    r'(?P<host>[^/?#\s]*)'
+    r'(?P<rest>.*)$',
+    re.IGNORECASE,
+)
+
+ALNUM_RUN_RE = re.compile(r'[A-Za-z0-9]{20,}')
+
+
+def parse_env_line(line):
+    """Parse one env file line. Returns (key, value) or None for comments/blanks/garbage."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        return None
+    m = LINE_RE.match(line)
+    if not m:
+        return None
+    return m.group('key'), unquote_value(m.group('value'))
+
+
+def unquote_value(raw):
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        inner = raw[1:-1]
+        if raw[0] == '"':
+            inner = inner.replace('\\"', '"').replace('\\\\', '\\')
+        return inner
+    # strip trailing inline comment for unquoted values
+    return raw.split(' #', 1)[0].strip()
+
+
+def quote_value(value):
+    if value == '' or re.search(r'[\s#\'"\\$`]', value):
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def parse_env_file(path):
+    """Return dict of key -> value, last occurrence wins."""
+    pairs = {}
+    for line in path.read_text().splitlines():
+        parsed = parse_env_line(line)
+        if parsed:
+            pairs[parsed[0]] = parsed[1]
+    return pairs
+
+
+def shannon_entropy(s):
+    if not s:
+        return 0.0
+    freq = {c: s.count(c) for c in set(s)}
+    return -sum(n / len(s) * math.log2(n / len(s)) for n in freq.values())
+
+
+def run_looks_random(run):
+    """True if an alphanumeric run looks like a random token: it mixes
+    letters and digits with high entropy. Hex, base62, and webhook secrets
+    qualify; readable words and pure numbers don't."""
+    return (
+        any(c.isdigit() for c in run)
+        and any(c.isalpha() for c in run)
+        and shannon_entropy(run) >= 3.5
+    )
+
+
+def entropy_looks_random(value):
+    """True if the value contains a random-looking token.
+
+    Random tokens show up as a long unbroken alphanumeric run. Structured
+    values (URLs, hostnames, bucket names, db names) are cut into short runs
+    by separators like -._/: and never qualify as a whole.
+    """
+    return any(run_looks_random(run) for run in ALNUM_RUN_RE.findall(value))
+
+
+def looks_like_secret(key, value):
+    # pure numbers (timeouts, sizes, retry counts) are config, never credentials
+    if value.isdigit():
+        return False
+    if SECRET_VALUE_RE.match(value):
+        return True
+    if SECRET_KEY_RE.search(key) and not NONSECRET_KEY_RE.search(key):
+        return True
+    return entropy_looks_random(value)
+
+
+def mask_value(value):
+    if len(value) >= 12:
+        return f'{value[:2]}{"*" * 6}{value[-2:]}'
+    return '*' * 6
+
+
+def mask_url(match):
+    """Mask only the secret segments of a URL: the userinfo password is
+    always masked (weak passwords are still passwords), random-looking runs
+    in the path/query are masked; scheme, host, and port stay in the clear."""
+    userinfo = match.group('userinfo')
+    if userinfo:
+        if ':' in userinfo:
+            user, password = userinfo.split(':', 1)
+            userinfo = f'{user}:{mask_value(password)}'
+        userinfo += '@'
+    rest = ALNUM_RUN_RE.sub(
+        lambda m: mask_value(m.group()) if run_looks_random(m.group()) else m.group(),
+        match.group('rest'),
+    )
+    return f"{match.group('head')}{userinfo or ''}{match.group('host')}{rest}"
+
+
+def display_value(key, value, unsafe=False):
+    if unsafe:
+        return value
+    url = URL_SPLIT_RE.match(value)
+    if url:
+        return mask_url(url)
+    if looks_like_secret(key, value):
+        return mask_value(value)
+    return quote_value(value)
+
+
+def upsert_pairs(path, pairs):
+    """Update or append pairs in an env file, preserving unrelated lines.
+
+    Returns list of (key, old_value_or_None, new_value) for keys actually changed.
+    """
+    lines = path.read_text().splitlines() if path.exists() else []
+    existing = parse_env_file(path) if path.exists() else {}
+
+    changes = []
+    remaining = dict(pairs)
+    new_lines = []
+    for line in lines:
+        parsed = parse_env_line(line)
+        if parsed and parsed[0] in remaining:
+            key = parsed[0]
+            new_value = remaining.pop(key)
+            if parsed[1] == new_value:
+                new_lines.append(line)
+            else:
+                changes.append((key, parsed[1], new_value))
+                new_lines.append(f'{key}={quote_value(new_value)}')
+        else:
+            new_lines.append(line)
+
+    for key, value in remaining.items():
+        if existing.get(key) == value:
+            continue
+        changes.append((key, existing.get(key), value))
+        new_lines.append(f'{key}={quote_value(value)}')
+
+    if changes:
+        path.write_text('\n'.join(new_lines) + '\n')
+    return changes
+
+
+def require_file(path):
+    if not path.is_file():
+        sys.exit(f'error: file not found: {path}')
+
+
+def select_keys(pairs, keys, source_label):
+    missing = [k for k in keys if k not in pairs]
+    if missing:
+        sys.exit(f'error: key(s) not found in {source_label}: {", ".join(missing)}')
+    return {k: pairs[k] for k in keys}
+
+
+def cmd_show(args):
+    path = Path(args.file)
+    require_file(path)
+    pairs = parse_env_file(path)
+    if args.keys:
+        pairs = select_keys(pairs, args.keys, args.file)
+    for key, value in pairs.items():
+        print(f'{key}={display_value(key, value, unsafe=args.unsafe)}')
+
+
+def cmd_list_keys(args):
+    path = Path(args.file)
+    require_file(path)
+    for key in parse_env_file(path):
+        print(key)
+
+
+def cmd_copy(args):
+    src = Path(args.source)
+    dest = Path(args.dest)
+    require_file(src)
+    src_pairs = parse_env_file(src)
+    pairs = src_pairs if args.full else select_keys(src_pairs, args.keys, args.source)
+
+    changes = upsert_pairs(dest, pairs)
+    if not changes:
+        print(f'no changes: {dest}')
+        return
+    for key, old, new in changes:
+        shown = display_value(key, new)
+        if old is None:
+            print(f'+ {key}={shown}')
+        else:
+            print(f'~ {key}={shown} (was {display_value(key, old)})')
+    print(f'updated {dest}: {len(changes)} change(s)')
+
+
+def cmd_set(args):
+    path = Path(args.file)
+    require_file(path)
+    value = sys.stdin.read()
+    if value.endswith('\n'):
+        value = value[:-1]
+    changes = upsert_pairs(path, {args.key: value})
+    if changes:
+        _, old, new = changes[0]
+        action = 'added' if old is None else 'updated'
+        print(f'{action} {args.key}={display_value(args.key, new)} in {path}')
+    else:
+        print(f'no changes: {args.key} already set in {path}')
+
+
+def cmd_read_value(args):
+    if not args.unsafe:
+        sys.exit('error: read-value exposes the raw value; pass --unsafe to confirm')
+    path = Path(args.file)
+    require_file(path)
+    pairs = parse_env_file(path)
+    if args.key not in pairs:
+        sys.exit(f'error: key not found in {args.file}: {args.key}')
+    print(pairs[args.key])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='envops',
+        description='Inspect and manipulate .env files; secret-looking values are masked by default.',
+    )
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    p = sub.add_parser('show', help='show key-values (secrets masked)')
+    p.add_argument('file')
+    p.add_argument('-k', '--keys', nargs='+', metavar='KEY', help='only show these keys')
+    p.add_argument('--unsafe', action='store_true', help='expose masked values (use with caution)')
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser('list-keys', help='list keys only')
+    p.add_argument('file')
+    p.set_defaults(func=cmd_list_keys)
+
+    p = sub.add_parser('copy', help='copy pairs from source to dest env file')
+    p.add_argument('source')
+    p.add_argument('dest')
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument('-k', '--keys', nargs='+', metavar='KEY', help='keys to copy')
+    group.add_argument('--full', action='store_true', help='copy all pairs')
+    p.set_defaults(func=cmd_copy)
+
+    p = sub.add_parser('set', help="set a key's value from stdin")
+    p.add_argument('file')
+    p.add_argument('-k', '--key', required=True, metavar='KEY')
+    p.set_defaults(func=cmd_set)
+
+    p = sub.add_parser('read-value', help="print a key's raw value (last resort, requires --unsafe)")
+    p.add_argument('file')
+    p.add_argument('-K', '--key', required=True, metavar='KEY')
+    p.add_argument('--unsafe', action='store_true', help='required: confirm exposing the raw value')
+    p.set_defaults(func=cmd_read_value)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()

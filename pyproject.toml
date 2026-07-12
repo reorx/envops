@@ -1,0 +1,15 @@
+[project]
+name = "envops"
+version = "0.1.0"
+description = "Inspect and manipulate .env files; secret-looking values are masked by default"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
