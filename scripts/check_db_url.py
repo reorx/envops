@@ -1,13 +1,9 @@
 """Check DB_URL structure without printing the value."""
-import importlib.util
 import sys
 from pathlib import Path
 
-spec = importlib.util.spec_from_loader('envops_mod', loader=None)
-mod = importlib.util.module_from_spec(spec)
-src = Path(__file__).resolve().parent.parent / 'envops'
-code = src.read_text().split("if __name__ == '__main__':")[0]
-exec(compile(code, str(src), 'exec'), mod.__dict__)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import envops as mod
 
 value = mod.parse_env_file(Path(sys.argv[1]))[sys.argv[2]]
 rest = value.split('://', 1)[1]

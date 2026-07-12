@@ -7,11 +7,15 @@ Built with Python stdlib only, runs via [uv](https://docs.astral.sh/uv/).
 ## Install
 
 ```sh
-git clone <this-repo> && cd envops
-ln -s "$PWD/envops" ~/bin/envops   # or anywhere on your PATH
+uv tool install envops   # or: pipx install envops / pip install envops
 ```
 
-Requires `uv` on PATH (the script uses a `#!/usr/bin/env -S uv run` shebang).
+Or run straight from a checkout without installing (requires `uv` on PATH — the script has a `#!/usr/bin/env -S uv run` shebang):
+
+```sh
+git clone https://github.com/reorx/envops && cd envops
+ln -s "$PWD/envops.py" ~/bin/envops   # or anywhere on your PATH
+```
 
 ## Usage
 

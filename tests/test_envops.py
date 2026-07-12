@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / 'envops'
+SCRIPT = Path(__file__).resolve().parent.parent / 'envops.py'
 
 SRC_CONTENT = '''\
 # app config
