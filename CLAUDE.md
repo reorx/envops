@@ -5,7 +5,7 @@
 ## Commands
 
 - Run tests: `uv run pytest`
-- Run the CLI directly: `./envops.py show <file>` (shebang runs it via uv)
+- Run the CLI directly: `./envops.py show <file>` (plain `python3` shebang, stdlib-only)
 - Build distributions: `uv build`; publish to PyPI: `uv publish` (needs a PyPI token)
 
 ## Workflow: fixing detection bugs (false positives / negatives)

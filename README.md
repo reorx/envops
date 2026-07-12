@@ -2,7 +2,7 @@
 
 A single-file CLI to inspect and manipulate `.env` files, designed to be safe by default: values that look like secrets are **masked** in all output unless you explicitly ask otherwise.
 
-Built with Python stdlib only, runs via [uv](https://docs.astral.sh/uv/).
+Built with Python stdlib only — a plain `python3` (≥3.10) runs it.
 
 ## Install
 
@@ -10,7 +10,13 @@ Built with Python stdlib only, runs via [uv](https://docs.astral.sh/uv/).
 uv tool install envops   # or: pipx install envops / pip install envops
 ```
 
-Or run straight from a checkout without installing (requires `uv` on PATH — the script has a `#!/usr/bin/env -S uv run` shebang):
+No `uv` (or pip)? It's a stdlib-only single file with a plain `python3` shebang — any Python ≥3.10 can run it. Just download the raw script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/reorx/envops/master/envops.py -o ~/.local/bin/envops && chmod +x ~/.local/bin/envops
+```
+
+Or run straight from a checkout without installing:
 
 ```sh
 git clone https://github.com/reorx/envops && cd envops
@@ -125,6 +131,17 @@ Masked form keeps the first and last 2 characters (`sk******ij`) so you can tell
 - Duplicate keys: last occurrence wins (dotenv semantics)
 - On write, values containing spaces or special characters are double-quoted with escaping
 - Writes preserve comments, blank lines, and unrelated lines byte-for-byte
+
+## Skill
+
+For AI agents (Claude Code, etc.), this repo ships a skill at [`skills/envops/SKILL.md`](skills/envops/SKILL.md). It instructs the agent to route **every** .env operation through envops — never `cat`/read env files directly, prefer masked output, and treat `--unsafe` as a last resort — and includes install steps plus a one-block cheat sheet of all commands.
+
+To use it, copy or symlink the directory into your skills folder:
+
+```sh
+ln -s "$PWD/skills/envops" ~/.claude/skills/envops        # global
+ln -s "$PWD/skills/envops" <project>/.claude/skills/envops # per project
+```
 
 ## Development
 

@@ -5,7 +5,16 @@ description: Safely view, modify, and copy .env files (local or remote over SSH)
 
 # envops — safe .env operations
 
-`envops` is on PATH (or run `./envops` from this repo). It masks secret-looking values in all output, so you can inspect env files without leaking credentials into the conversation, logs, or context.
+`envops` masks secret-looking values in all output, so you can inspect env files without leaking credentials into the conversation, logs, or context.
+
+## Install (if `envops` is not on PATH)
+
+```sh
+uv tool install envops    # preferred (published on PyPI); or: pipx/pip install envops
+
+# no uv/pip: it's a stdlib-only single file (python3 shebang, needs 3.10+)
+curl -fsSL https://raw.githubusercontent.com/reorx/envops/master/envops.py -o ~/.local/bin/envops && chmod +x ~/.local/bin/envops
+```
 
 ## Hard rules
 
