@@ -1,5 +1,6 @@
 """Behavior tests for the envops CLI, invoked as a subprocess."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -154,7 +155,7 @@ class TestUrlSegmentMasking:
         # (raw value, expected display)
         'NEO4J_URL': (
             'neo4j://neo4j:123da5069e1e6093416d34cc@102.10.101.125:7687',
-            'neo4j://neo4j:12******cc@102.103.101.125:7687',
+            'neo4j://neo4j:12******cc@102.10.101.125:7687',
         ),
         'DB_URL': (
             'mysql://root:UFuz4Tcyk4wzFDQ@mariadb:3306/dwtoolkit',
@@ -296,3 +297,110 @@ class TestReadValue:
     def test_old_command_name_is_gone(self, src):
         result = run('unsafe-read-value', str(src), '-K', 'FOO')
         assert result.returncode != 0
+
+
+FAKE_SSH = '''\
+#!/bin/sh
+# fake ssh for tests: `ssh <host> <command...>` runs the command in a local
+# shell, so `host:/abs/path` arguments resolve to real files in tmp_path.
+echo "$1" >> "$FAKE_SSH_LOG"
+shift
+exec sh -c "$*"
+'''
+
+
+@pytest.fixture
+def remote(tmp_path):
+    """Run envops with a fake `ssh` on PATH; remote paths map to local files."""
+    bin_dir = tmp_path / 'fakebin'
+    bin_dir.mkdir()
+    fake_ssh = bin_dir / 'ssh'
+    fake_ssh.write_text(FAKE_SSH)
+    fake_ssh.chmod(0o755)
+    log = tmp_path / 'ssh.log'
+
+    def run_remote(*args, stdin=None):
+        env = {
+            **os.environ,
+            'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+            'FAKE_SSH_LOG': str(log),
+        }
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+        )
+
+    run_remote.log = log
+    return run_remote
+
+
+class TestRemoteSSH:
+    """`[user@]host:/path` file arguments are read and written over ssh."""
+
+    def test_copy_local_to_remote(self, src, dest, remote):
+        result = remote('copy', str(src), f'foo@testhost:{dest}', '-k', 'FOO', 'BAR')
+        assert result.returncode == 0
+        content = dest.read_text()
+        assert 'FOO=hello' in content
+        assert 'BAR="quoted value"' in content
+        assert 'foo@testhost' in remote.log.read_text()
+
+    def test_copy_reports_changes_with_remote_dest_label(self, src, dest, remote):
+        out = remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO').stdout
+        assert '~ FOO=hello (was old_foo)' in out
+        assert f'testhost:{dest}' in out
+
+    def test_copy_preserves_unrelated_remote_lines(self, src, dest, remote):
+        remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO')
+        content = dest.read_text()
+        assert 'KEEP_ME=untouched' in content
+        assert '# existing dest' in content
+
+    def test_copy_creates_missing_remote_dest(self, src, tmp_path, remote):
+        new_dest = tmp_path / 'new.env'
+        result = remote('copy', str(src), f'testhost:{new_dest}', '--full')
+        assert result.returncode == 0
+        assert 'DEBUG=true' in new_dest.read_text()
+
+    def test_remote_write_preserves_permissions(self, src, dest, remote):
+        dest.chmod(0o640)
+        remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO')
+        assert dest.stat().st_mode & 0o777 == 0o640
+
+    def test_remote_write_leaves_no_temp_files(self, src, dest, remote):
+        remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO')
+        leftovers = [p.name for p in dest.parent.iterdir() if p.name.startswith('dest.env.')]
+        assert leftovers == []
+
+    def test_copy_noop_on_remote(self, src, dest, remote):
+        remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO')
+        out = remote('copy', str(src), f'testhost:{dest}', '-k', 'FOO').stdout
+        assert 'no changes' in out
+
+    def test_remote_source_for_copy(self, src, dest, remote):
+        result = remote('copy', f'testhost:{src}', str(dest), '-k', 'FOO')
+        assert result.returncode == 0
+        assert 'FOO=hello' in dest.read_text()
+
+    def test_show_remote_masks_secrets(self, src, remote):
+        out = remote('show', f'testhost:{src}').stdout
+        assert 'FOO=hello' in out
+        assert 'sk-1234567890abcdefghij' not in out
+
+    def test_set_remote_key_from_stdin(self, src, remote):
+        result = remote('set', f'testhost:{src}', '-k', 'FOO', stdin='new value\n')
+        assert result.returncode == 0
+        assert 'FOO="new value"' in src.read_text()
+
+    def test_missing_remote_file_fails(self, tmp_path, remote):
+        result = remote('show', f'testhost:{tmp_path}/nope.env')
+        assert result.returncode != 0
+
+    def test_local_paths_never_invoke_ssh(self, src, remote):
+        result = remote('show', str(src))
+        assert result.returncode == 0
+        assert not remote.log.exists()

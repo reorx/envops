@@ -26,6 +26,9 @@ Usage:
     # set a key's value from stdin
     echo value | envops set ./test.env -k FOO
 
+    # any file argument may be remote (scp-style), accessed over ssh
+    envops copy ./test.env foo@bar:/app/.env --full
+
     # read a key's raw value (last resort, exposes the value)
     envops unsafe-read-value ./test.env -K FOO
 """
@@ -33,6 +36,8 @@ Usage:
 import argparse
 import math
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -183,7 +188,11 @@ def upsert_pairs(path, pairs):
     Returns list of (key, old_value_or_None, new_value) for keys actually changed.
     """
     lines = path.read_text().splitlines() if path.exists() else []
-    existing = parse_env_file(path) if path.exists() else {}
+    existing = {}
+    for line in lines:
+        parsed = parse_env_line(line)
+        if parsed:
+            existing[parsed[0]] = parsed[1]
 
     changes = []
     remaining = dict(pairs)
@@ -212,6 +221,55 @@ def upsert_pairs(path, pairs):
     return changes
 
 
+# rsync/scp rule: a colon before the first slash marks a remote path
+REMOTE_PATH_RE = re.compile(r'^(?P<host>[^/]+):(?P<path>.+)$')
+
+
+class RemoteFile:
+    """A file on a remote host, accessed over ssh with a Path-like interface."""
+
+    def __init__(self, host, path):
+        self.host = host
+        self.path = path
+
+    def __str__(self):
+        return f'{self.host}:{self.path}'
+
+    def _ssh(self, command, **kwargs):
+        return subprocess.run(['ssh', self.host, command], capture_output=True, text=True, **kwargs)
+
+    def is_file(self):
+        return self._ssh(f'test -f {shlex.quote(self.path)}').returncode == 0
+
+    exists = is_file
+
+    def read_text(self):
+        result = self._ssh(f'cat {shlex.quote(self.path)}')
+        if result.returncode != 0:
+            sys.exit(f'error: reading {self}: {result.stderr.strip()}')
+        return result.stdout
+
+    def write_text(self, content):
+        # atomic replace: temp file in the same dir, then mv over the target;
+        # original permissions are kept (GNU stat first, BSD/macOS fallback)
+        q = shlex.quote(self.path)
+        script = (
+            f'set -e; t=$(mktemp {q}.XXXXXX); cat > "$t"; '
+            f'p=$(stat -c %a {q} 2>/dev/null || stat -f %Lp {q} 2>/dev/null || echo 600); '
+            f'chmod "$p" "$t"; mv "$t" {q}'
+        )
+        result = self._ssh(script, input=content)
+        if result.returncode != 0:
+            sys.exit(f'error: writing {self}: {result.stderr.strip()}')
+
+
+def resolve_path(arg):
+    m = REMOTE_PATH_RE.match(arg)
+    if m:
+        return RemoteFile(m.group('host'), m.group('path'))
+    return Path(arg)
+
+
 def require_file(path):
     if not path.is_file():
         sys.exit(f'error: file not found: {path}')
@@ -225,7 +283,7 @@ def select_keys(pairs, keys, source_label):
 
 
 def cmd_show(args):
-    path = Path(args.file)
+    path = resolve_path(args.file)
     require_file(path)
     pairs = parse_env_file(path)
     if args.keys:
@@ -235,15 +293,15 @@ def cmd_show(args):
 
 
 def cmd_list_keys(args):
-    path = Path(args.file)
+    path = resolve_path(args.file)
     require_file(path)
     for key in parse_env_file(path):
         print(key)
 
 
 def cmd_copy(args):
-    src = Path(args.source)
-    dest = Path(args.dest)
+    src = resolve_path(args.source)
+    dest = resolve_path(args.dest)
     require_file(src)
     src_pairs = parse_env_file(src)
     pairs = src_pairs if args.full else select_keys(src_pairs, args.keys, args.source)
@@ -262,7 +320,7 @@ def cmd_copy(args):
 
 
 def cmd_set(args):
-    path = Path(args.file)
+    path = resolve_path(args.file)
     require_file(path)
     value = sys.stdin.read()
     if value.endswith('\n'):
@@ -279,7 +337,7 @@ def cmd_set(args):
 def cmd_read_value(args):
     if not args.unsafe:
         sys.exit('error: read-value exposes the raw value; pass --unsafe to confirm')
-    path = Path(args.file)
+    path = resolve_path(args.file)
     require_file(path)
     pairs = parse_env_file(path)
     if args.key not in pairs:

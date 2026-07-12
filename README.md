@@ -75,6 +75,23 @@ Only use this when the other commands cannot solve the problem, as it exposes th
 envops read-value ./test.env -K FOO --unsafe
 ```
 
+### Remote files over SSH
+
+Any file argument may be an scp-style remote path (`[user@]host:/path`, a colon before the first slash marks it remote). Hosts, keys, and options come from your regular ssh config:
+
+```sh
+envops show foo@bar:/app/.env
+envops copy /tmp/test.env foo@bar:/app/.env --full
+envops copy foo@bar:/app/.env ./local.env -k DATABASE_URL
+```
+
+Remote handling keeps the tool's safety guarantees:
+
+- remote content is only ever held in memory — no plaintext temp file lands on the local disk
+- writes are atomic: content goes to a `mktemp` file next to the target, then `mv` replaces it, so a dropped connection can't leave a half-written `.env`
+- the target's permissions are preserved (`stat -c` on Linux, `stat -f` on macOS/BSD remotes; `600` for newly created files)
+- output masking works exactly as for local files
+
 ## Secret detection
 
 A value is masked when any of these match — except pure-numeric values (timeouts, sizes, retry counts like `AUTH_TOKEN_EXPIRE=604800`), which are never treated as secrets:
