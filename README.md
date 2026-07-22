@@ -4,24 +4,24 @@ A single-file CLI to inspect and manipulate `.env` files, designed to be safe by
 
 Built with Python stdlib only — a plain `python3` (≥3.10) runs it.
 
+Though it works as a regular CLI, envops is first and foremost a **skill for AI agents**: the bundled skill ([`skills/envops/SKILL.md`](skills/envops/SKILL.md)) makes the agent route *every* .env operation through envops — never `cat` or read env files directly, prefer masked output, treat `--unsafe` as a last resort — so credentials never leak into the conversation, logs, or context.
+
+
 ## Install
 
-```sh
-uv tool install envops   # or: pipx install envops / pip install envops
-```
-
-No `uv` (or pip)? It's a stdlib-only single file with a plain `python3` shebang — any Python ≥3.10 can run it. Just download the raw script:
+Install the skill into your agent (Claude Code, etc.) with [`skills`](https://github.com/vercel-labs/skills):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/reorx/envops/master/envops.py -o ~/.local/bin/envops && chmod +x ~/.local/bin/envops
+npx skills add reorx/envops
 ```
 
-Or run straight from a checkout without installing:
+Or with [skm](https://github.com/reorx/skm):
 
 ```sh
-git clone https://github.com/reorx/envops && cd envops
-ln -s "$PWD/envops.py" ~/bin/envops   # or anywhere on your PATH
+skm install https://github.com/reorx/envops
 ```
+
+That's all — the skill carries the CLI's own install steps, so the agent sets up the `envops` command by itself the first time it needs it.
 
 ## Usage
 
@@ -131,17 +131,6 @@ Masked form keeps the first and last 2 characters (`sk******ij`) so you can tell
 - Duplicate keys: last occurrence wins (dotenv semantics)
 - On write, values containing spaces or special characters are double-quoted with escaping
 - Writes preserve comments, blank lines, and unrelated lines byte-for-byte
-
-## Skill
-
-For AI agents (Claude Code, etc.), this repo ships a skill at [`skills/envops/SKILL.md`](skills/envops/SKILL.md). It instructs the agent to route **every** .env operation through envops — never `cat`/read env files directly, prefer masked output, and treat `--unsafe` as a last resort — and includes install steps plus a one-block cheat sheet of all commands.
-
-To use it, copy or symlink the directory into your skills folder:
-
-```sh
-ln -s "$PWD/skills/envops" ~/.claude/skills/envops        # global
-ln -s "$PWD/skills/envops" <project>/.claude/skills/envops # per project
-```
 
 ## Development
 
