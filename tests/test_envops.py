@@ -9,7 +9,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / 'envops.py'
 
-SRC_CONTENT = '''\
+SRC_CONTENT = """\
 # app config
 FOO=hello
 BAR="quoted value"
@@ -19,7 +19,7 @@ DB_PASSWORD='p@ss w0rd!'
 PLAIN_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz123456
 DEBUG=true
 EMPTY=
-'''
+"""
 
 
 def run(*args, stdin=None):
@@ -299,14 +299,21 @@ class TestReadValue:
         assert result.returncode != 0
 
 
-FAKE_SSH = '''\
+FAKE_SSH = """\
 #!/bin/sh
 # fake ssh for tests: `ssh <host> <command...>` runs the command in a local
 # shell, so `host:/abs/path` arguments resolve to real files in tmp_path.
+# Like real ssh, it drains any stdin left unread by the command: real ssh
+# forwards local stdin to the remote and discards whatever the session did
+# not consume. Callers that spawn ssh while holding piped data on inherited
+# stdin lose that data (the `set` regression this shim must reproduce).
 echo "$1" >> "$FAKE_SSH_LOG"
 shift
-exec sh -c "$*"
-'''
+sh -c "$*"
+rc=$?
+cat > /dev/null
+exit $rc
+"""
 
 
 @pytest.fixture
@@ -319,7 +326,10 @@ def remote(tmp_path):
     fake_ssh.chmod(0o755)
     log = tmp_path / 'ssh.log'
 
-    def run_remote(*args, stdin=None):
+    # stdin defaults to '' (an immediately-closed pipe), never None: with
+    # None the fake ssh's stdin drain would read pytest's own stdin and can
+    # block forever on a tty.
+    def run_remote(*args, stdin=''):
         env = {
             **os.environ,
             'PATH': f'{bin_dir}:{os.environ["PATH"]}',

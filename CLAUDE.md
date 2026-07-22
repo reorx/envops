@@ -2,6 +2,10 @@
 
 # Development Guide
 
+## Postmortems (`docs/`)
+
+- `docs/2026-07-15-postmortem-remote-set-stdin.md` — remote `set` silently wrote empty values: a preliminary ssh call inherited and drained the caller's stdin pipe. Read it before touching `RemoteFile._ssh`, stdin handling in any command, or the fake-ssh test shim (which must keep emulating real ssh's stdin draining).
+
 ## Commands
 
 - Run tests: `uv run pytest`

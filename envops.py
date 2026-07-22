@@ -116,11 +116,7 @@ def run_looks_random(run):
     """True if an alphanumeric run looks like a random token: it mixes
     letters and digits with high entropy. Hex, base62, and webhook secrets
     qualify; readable words and pure numbers don't."""
-    return (
-        any(c.isdigit() for c in run)
-        and any(c.isalpha() for c in run)
-        and shannon_entropy(run) >= 3.5
-    )
+    return any(c.isdigit() for c in run) and any(c.isalpha() for c in run) and shannon_entropy(run) >= 3.5
 
 
 def entropy_looks_random(value):
@@ -164,7 +160,7 @@ def mask_url(match):
         lambda m: mask_value(m.group()) if run_looks_random(m.group()) else m.group(),
         match.group('rest'),
     )
-    return f"{match.group('head')}{userinfo or ''}{match.group('host')}{rest}"
+    return f'{match.group("head")}{userinfo or ""}{match.group("host")}{rest}'
 
 
 def display_value(key, value, unsafe=False):
@@ -232,6 +228,13 @@ class RemoteFile:
         return f'{self.host}:{self.path}'
 
     def _ssh(self, command, **kwargs):
+        # Detach ssh from the caller's stdin unless we are feeding it
+        # explicitly (input=): ssh forwards local stdin to the remote and
+        # discards what the session doesn't consume, so an inherited pipe
+        # (e.g. `printf val | envops set host:/f -k KEY`) would be drained
+        # by a preliminary ssh call before cmd_set ever reads it.
+        if 'input' not in kwargs:
+            kwargs.setdefault('stdin', subprocess.DEVNULL)
         return subprocess.run(['ssh', self.host, command], capture_output=True, text=True, **kwargs)
 
     def is_file(self):
@@ -316,11 +319,13 @@ def cmd_copy(args):
 
 
 def cmd_set(args):
-    path = resolve_path(args.file)
-    require_file(path)
+    # Read the piped value before anything that may spawn a child process
+    # (require_file on a remote path runs ssh, which competes for stdin).
     value = sys.stdin.read()
     if value.endswith('\n'):
         value = value[:-1]
+    path = resolve_path(args.file)
+    require_file(path)
     changes = upsert_pairs(path, {args.key: value})
     if changes:
         _, old, new = changes[0]
